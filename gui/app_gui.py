@@ -36,6 +36,7 @@ import numpy as np
 import cv2
 
 from core.coord_mapper import CoordMapper
+from core.fire_fusion import FireFusion
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,17 @@ def _refresh_device_combo(combo):
     combo.setCurrentText(current)
 
 
+def _compact_layout(layout, margins=(6, 4, 6, 4), h_spacing=6, v_spacing=4):
+    """레이아웃 기본 여백/간격을 줄여 컴팩트하게 배치"""
+    if hasattr(layout, "setContentsMargins"):
+        layout.setContentsMargins(*margins)
+    if isinstance(layout, QGridLayout):
+        layout.setHorizontalSpacing(h_spacing)
+        layout.setVerticalSpacing(v_spacing)
+    elif hasattr(layout, "setSpacing"):
+        layout.setSpacing(min(h_spacing, v_spacing))
+
+
 class LogSignaller(QObject):
     message = pyqtSignal(str)
 
@@ -199,6 +211,14 @@ class MainWindow(QMainWindow):
         self.ir_ts_history = deque(maxlen=60)
         self.config = controller.cfg if hasattr(controller, "cfg") else {}
         self._last_det_ts = None
+        coord_params = self.controller.get_coord_cfg() if self.controller else {'offset_x': 0.0, 'offset_y': 0.0, 'scale': 1.0}
+        self.fire_fusion = FireFusion(
+            ir_size=(160, 120),
+            rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
+            offset_x=0,
+            offset_y=0,
+            scale=None,
+        )
 
         rgb_input_cfg, ir_input_cfg = (self.controller.get_input_cfg() if self.controller else ({}, {}))
 
@@ -213,7 +233,6 @@ class MainWindow(QMainWindow):
         self.det_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.det_info = QLabel("-")
         self.det_info.setWordWrap(True)
-
         self.ir_label = QLabel("IR Preview")
         self.ir_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.ir_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -301,6 +320,9 @@ class MainWindow(QMainWindow):
         rgb_box = QGroupBox("RGB Input")
         rgb_form = QGridLayout()
         rgb_form.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(rgb_form)
+        rgb_form.setColumnStretch(1, 1)
+        rgb_form.setColumnStretch(2, 1)
         rgb_form.addWidget(QLabel("Mode"), 0, 0)
         rgb_form.addWidget(self.rgb_mode_combo, 0, 1)
         rgb_form.addWidget(QLabel("Path(s)"), 1, 0)
@@ -314,6 +336,9 @@ class MainWindow(QMainWindow):
         ir_box = QGroupBox("IR Input")
         ir_form = QGridLayout()
         ir_form.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(ir_form)
+        ir_form.setColumnStretch(1, 1)
+        ir_form.setColumnStretch(2, 1)
         ir_form.addWidget(QLabel("Mode"), 0, 0)
         ir_form.addWidget(self.ir_mode_combo, 0, 1)
         ir_form.addWidget(QLabel("Path(s)"), 1, 0)
@@ -332,10 +357,12 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.dev_refresh_btn)
         input_layout.addStretch()
         input_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(input_layout, margins=(8, 6, 8, 6), h_spacing=6, v_spacing=6)
 
-        coord_params = self.controller.get_coord_cfg() if self.controller else {'offset_x': 0.0, 'offset_y': 0.0, 'scale': 1.0}
         coord_layout = QVBoxLayout()
+        _compact_layout(coord_layout, margins=(8, 6, 8, 6), h_spacing=6, v_spacing=6)
         coord_row = QHBoxLayout()
+        _compact_layout(coord_row, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         self.offset_x_spin = QDoubleSpinBox()
         self.offset_x_spin.setRange(-1000.0, 1000.0)
         self.offset_x_spin.setDecimals(2)
@@ -354,9 +381,7 @@ class MainWindow(QMainWindow):
         self.scale_spin.setRange(0.1, 20.0)
         self.scale_spin.setDecimals(3)
         self.scale_spin.setSingleStep(0.05)
-        scale_val = coord_params.get('scale')
-        if scale_val:
-            self.scale_spin.setValue(scale_val)
+        self.scale_spin.setValue(coord_params.get('scale', 1.0))
         coord_row.addWidget(QLabel("Scale"))
         coord_row.addWidget(self.scale_spin)
 
@@ -366,6 +391,7 @@ class MainWindow(QMainWindow):
         coord_layout.addLayout(coord_row)
 
         step_layout = QHBoxLayout()
+        _compact_layout(step_layout, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         step_layout.addWidget(QLabel("Offset Step"))
         self.offset_step_spin = QDoubleSpinBox()
         self.offset_step_spin.setRange(0.1, 100.0)
@@ -378,6 +404,7 @@ class MainWindow(QMainWindow):
         coord_layout.addLayout(step_layout)
 
         scale_step_layout = QHBoxLayout()
+        _compact_layout(scale_step_layout, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         scale_step_layout.addWidget(QLabel("Scale Step"))
         self.scale_step_spin = QDoubleSpinBox()
         self.scale_step_spin.setRange(0.001, 1.0)
@@ -398,6 +425,8 @@ class MainWindow(QMainWindow):
         capture_cfg = self.controller.get_capture_cfg() if self.controller else {}
         capture_layout = QGridLayout()
         capture_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(capture_layout)
+        capture_layout.setColumnStretch(1, 1)
         self.capture_output_edit = QLineEdit(capture_cfg.get('OUTPUT_DIR', "./capture_session"))
         capture_layout.addWidget(QLabel("Capture Output"), 0, 0)
         capture_layout.addWidget(self.capture_output_edit, 0, 1)
@@ -422,6 +451,7 @@ class MainWindow(QMainWindow):
         ir_fire_box = QGroupBox("IR Hotspot Settings")
         ir_fire_layout = QHBoxLayout()
         ir_fire_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(ir_fire_layout, margins=(8, 6, 8, 6), h_spacing=6, v_spacing=6)
         self.ir_fire_chk = QCheckBox("Fire Detection")
         self.ir_fire_chk.setChecked(bool(ir_fire_cfg.get('FIRE_DETECTION', True)))
         self.ir_fire_min = QDoubleSpinBox()
@@ -463,6 +493,8 @@ class MainWindow(QMainWindow):
         infer_box = QGroupBox("RGB Inference Settings")
         infer_layout = QGridLayout()
         infer_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        _compact_layout(infer_layout)
+        infer_layout.setColumnStretch(1, 1)
         infer_layout.addWidget(QLabel("Model"), 0, 0)
         infer_layout.addWidget(self.model_edit, 0, 1)
         infer_layout.addWidget(self.model_browse, 0, 2)
@@ -473,6 +505,7 @@ class MainWindow(QMainWindow):
         infer_layout.addWidget(self.delegate_edit, 2, 1)
         infer_layout.addWidget(self.delegate_browse, 2, 2)
         class_row = QHBoxLayout()
+        _compact_layout(class_row, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         class_row.addWidget(QLabel("Classes"))
         class_row.addWidget(self.cls_smoke_chk)
         class_row.addWidget(self.cls_fire_chk)
@@ -704,6 +737,10 @@ class MainWindow(QMainWindow):
             'scale': self.scale_spin.value(),
         }
         self.controller.set_coord_cfg(params)
+        # UI 동기화
+        self.offset_x_spin.setValue(params.get('offset_x', self.offset_x_spin.value()))
+        self.offset_y_spin.setValue(params.get('offset_y', self.offset_y_spin.value()))
+        self.scale_spin.setValue(params.get('scale'))
         self.append_log(f"Coord updated: {params}")
 
     def apply_ir_fire_settings(self):
@@ -782,8 +819,28 @@ class MainWindow(QMainWindow):
         self.apply_coord_settings()
 
     def nudge_scale(self, ds):
-        self.scale_spin.setValue(max(0.1, self.scale_spin.value() + ds))
+        new_scale = max(0.1, self.scale_spin.value() + ds)
+        self.scale_spin.setValue(new_scale)
+        self.append_log(f"Scale nudged to {new_scale:.3f}")
         self.apply_coord_settings()
+
+    def _sync_coord_ui(self):
+        """컨트롤러에 저장된 좌표/스케일을 UI에 반영 (가시성 확보용)"""
+        if not self.controller:
+            return
+        params = self.controller.get_coord_cfg()
+        self.offset_x_spin.blockSignals(True)
+        self.offset_y_spin.blockSignals(True)
+        self.scale_spin.blockSignals(True)
+        try:
+            self.offset_x_spin.setValue(params.get('offset_x', self.offset_x_spin.value()))
+            self.offset_y_spin.setValue(params.get('offset_y', self.offset_y_spin.value()))
+            if params.get('scale') is not None:
+                self.scale_spin.setValue(params.get('scale'))
+        finally:
+            self.offset_x_spin.blockSignals(False)
+            self.offset_y_spin.blockSignals(False)
+            self.scale_spin.blockSignals(False)
 
     def closeEvent(self, event):
         if self.capture_process:
@@ -806,6 +863,7 @@ class MainWindow(QMainWindow):
         det_count = len(det_meta) if det_meta else 0
         det_ts_str = det_item[1] if det_item else None
         ir_meta = ir_item[2] if ir_item and len(ir_item) > 2 else None
+        ir_hotspots = ir_item[3] if ir_item and len(ir_item) > 3 else []
         ir_max = None
         ir_min = None
         if ir_meta and isinstance(ir_meta, dict):
@@ -825,6 +883,34 @@ class MainWindow(QMainWindow):
         if t_ir:
             self.ir_ts_history.append(t_ir)
 
+        self._sync_coord_ui()
+
+        # Fusion annotations (color-coded) drawn on det_frame base (det_frame has no boxes/text)
+        fusion_info = "-"
+        annotated_det = det_frame.copy() if det_frame is not None else None
+        if det_meta and annotated_det is not None:
+            if self.controller:
+                params = self.controller.get_coord_cfg()
+                self.fire_fusion.coord_mapper = CoordMapper(
+                    ir_size=(160, 120),
+                    rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
+                    offset_x=params.get('offset_x', 0.0),
+                    offset_y=params.get('offset_y', 0.0),
+                    scale=params.get('scale'),
+                )
+            if not isinstance(ir_hotspots, list):
+                ir_hotspots = []
+            eo_bboxes = [d for d in det_meta if len(d) >= 6]
+            fusion = self.fire_fusion.fuse(ir_hotspots, eo_bboxes)
+            fusion_info = f"{fusion['status']} | conf={fusion['confidence']:.2f} | ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
+            for ann in fusion.get('eo_annotations', []):
+                bbox = ann.get('bbox', [])
+                if len(bbox) < 4:
+                    continue
+                x, y, w, h = bbox
+                color = ann.get('color', (0, 0, 255))
+                cv2.rectangle(annotated_det, (int(x), int(y)), (int(x + w), int(y + h)), color, 3)
+
         if rgb_frame is not None:
             pix = _cv_to_qpixmap(rgb_frame)
             if pix:
@@ -839,15 +925,15 @@ class MainWindow(QMainWindow):
             self.rgb_info.setText(
                 f"RGB {rgb_frame.shape[1]}x{rgb_frame.shape[0]} | fps~{_calc_fps(self.rgb_ts_history):.1f} | dev={rgb_dev} | model={model_name}"
             )
-        if det_frame is not None:
-            pix = _cv_to_qpixmap(det_frame)
+        if annotated_det is not None:
+            pix = _cv_to_qpixmap(annotated_det)
             if pix:
                 self.det_label.setPixmap(pix.scaled(
                     self.det_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation))
             model_name = self.config.get('MODEL', "-") if self.config else "-"
             self.det_info.setText(
-                f"Det {det_frame.shape[1]}x{det_frame.shape[0]} | det={det_count} | model={model_name}"
+                f"Det {annotated_det.shape[1]}x{annotated_det.shape[0]} | det={det_count} | model={model_name}"
             )
         if ir_frame is not None:
             pix = _cv_to_qpixmap(ir_frame)
@@ -894,7 +980,7 @@ class MainWindow(QMainWindow):
         if self.ir_plot:
             self.ir_plot.update_value(ir_fps)
 
-        base_rgb_for_overlay = det_frame if det_frame is not None else rgb_frame
+        base_rgb_for_overlay = rgb_frame
         overlay_frame = build_overlay(base_rgb_for_overlay, ir_frame, self.controller.get_coord_cfg() if self.controller else {})
         if overlay_frame is not None:
             pix = _cv_to_qpixmap(overlay_frame)
@@ -906,6 +992,31 @@ class MainWindow(QMainWindow):
             self.overlay_info.setText(
                 f"Overlay offset=({coord.get('offset_x',0):.1f},{coord.get('offset_y',0):.1f}) scale={coord.get('scale','auto')}"
             )
+
+        # Fusion (IR + EO) overlay with color-coded boxes on det frame
+        fusion_info = "-"
+        if det_meta and annotated_det is not None:
+            if self.controller:
+                params = self.controller.get_coord_cfg()
+                self.fire_fusion.coord_mapper = CoordMapper(
+                    ir_size=(160, 120),
+                    rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
+                    offset_x=params.get('offset_x', 0.0),
+                    offset_y=params.get('offset_y', 0.0),
+                    scale=params.get('scale'),
+                )
+            if not isinstance(ir_hotspots, list):
+                ir_hotspots = []
+            eo_bboxes = [d for d in det_meta if len(d) >= 6]
+            fusion = self.fire_fusion.fuse(ir_hotspots, eo_bboxes)
+            fusion_info = f"{fusion['status']} | conf={fusion['confidence']:.2f} | ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
+            for ann in fusion.get('eo_annotations', []):
+                bbox = ann.get('bbox', [])
+                if len(bbox) < 4:
+                    continue
+                x, y, w, h = bbox
+                color = ann.get('color', (0, 0, 255))
+                cv2.rectangle(annotated_det, (int(x), int(y)), (int(x + w), int(y + h)), color, 3)
 
 
 def run_gui(buffers, camera_state, controller):

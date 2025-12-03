@@ -464,10 +464,8 @@ class TFLiteWorker(threading.Thread):
             frame, ts = item
             scores, boxes_xyxy, classes = self._infer_once(frame)
 
-            # 1) 원본 프레임에 박스 오버레이
+            # 1) 원본 프레임 복사 (GUI/송신 단계에서 오버레이 처리)
             vis = frame.copy()
-            vis = _draw_boxes(vis, boxes_xyxy, classes, scores, self.labels,
-                              thr=SCORE_THRESH)
 
             # 2) 표시용 해상도(TARGET_W x TARGET_H)로 리사이즈
             # vis = cv2.resize(vis, self.target_res, interpolation=cv2.INTER_AREA)

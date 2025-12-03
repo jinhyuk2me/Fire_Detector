@@ -169,7 +169,7 @@ def draw_bbox(frame, datas):
         - 두께 1픽셀
     """
     for bbox in datas:
-        y, x, h, w = bbox  # 주의: detect_fire에서 (x, y, w, h) 순서로 저장됨
+        x, y, w, h = bbox  # detect_fire returns (x, y, w, h)
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 1)
     return frame
 
