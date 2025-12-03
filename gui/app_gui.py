@@ -331,6 +331,11 @@ class MainWindow(QMainWindow):
         self.model_edit = QLineEdit(det_cfg.get('MODEL', ""))
         self.delegate_edit = QLineEdit(det_cfg.get('DELEGATE', ""))
         self.label_edit = QLineEdit(det_cfg.get('LABEL', ""))
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.0, 1.0)
+        self.conf_spin.setDecimals(3)
+        self.conf_spin.setSingleStep(0.01)
+        self.conf_spin.setValue(float(det_cfg.get('CONF_THR', det_cfg.get('CONF_THRESHOLD', 0.15))))
         self.model_browse = QPushButton("Browse")
         self.model_browse.clicked.connect(self.browse_model)
         self.label_browse = QPushButton("Browse")
@@ -541,14 +546,16 @@ class MainWindow(QMainWindow):
         infer_layout.addWidget(QLabel("Delegate"), 2, 0)
         infer_layout.addWidget(self.delegate_edit, 2, 1)
         infer_layout.addWidget(self.delegate_browse, 2, 2)
+        infer_layout.addWidget(QLabel("Conf Thr"), 3, 0)
+        infer_layout.addWidget(self.conf_spin, 3, 1)
         class_row = QHBoxLayout()
         _compact_layout(class_row, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         class_row.addWidget(QLabel("Classes"))
         class_row.addWidget(self.cls_smoke_chk)
         class_row.addWidget(self.cls_fire_chk)
         class_row.addStretch()
-        infer_layout.addLayout(class_row, 3, 0, 1, 3)
-        infer_layout.addWidget(self.apply_infer_btn, 4, 0, 1, 3)
+        infer_layout.addLayout(class_row, 4, 0, 1, 3)
+        infer_layout.addWidget(self.apply_infer_btn, 5, 0, 1, 3)
         infer_box.setLayout(infer_layout)
 
         infer_tab = QWidget()
@@ -824,6 +831,7 @@ class MainWindow(QMainWindow):
                 label_path=self.label_edit.text().strip(),
                 delegate=self.delegate_edit.text().strip(),
                 allowed_classes=allowed,
+                conf_thr=self.conf_spin.value(),
                 use_npu=bool(self.delegate_edit.text().strip()),
                 restart=True
             )
@@ -957,6 +965,24 @@ class MainWindow(QMainWindow):
         fusion_info = "-"
         annotated_det = det_frame.copy() if det_frame is not None else None
         if det_meta and annotated_det is not None:
+            # EO det 노란 박스 + conf 텍스트를 GUI에서 직접 그려 같은 레이어 유지
+            for det in det_meta:
+                if len(det) < 6:
+                    continue
+                x, y, w, h, conf, cls_id = det[:6]
+                x1, y1, x2, y2 = int(x), int(y), int(x + w), int(y + h)
+                cv2.rectangle(annotated_det, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                cv2.putText(
+                    annotated_det,
+                    f"{conf:.2f}",
+                    (x1, max(0, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
             if self.controller:
                 params = self.controller.get_coord_cfg()
                 self.fire_fusion.coord_mapper = CoordMapper(

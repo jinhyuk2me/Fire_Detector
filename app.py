@@ -347,6 +347,7 @@ class RuntimeController:
         allowed = cfg.get('ALLOWED_CLASSES')
         use_npu = bool(cfg.get('USE_NPU', False))
         cpu_threads = cfg.get('CPU_THREADS', 1)
+        conf_thr = float(cfg.get('CONF_THR', cfg.get('CONF_THRESHOLD', 0.15)))
         name = cfg.get('NAME', "DetRGB")
         new_worker = TFLiteWorker(
             model_path=model_path,
@@ -359,13 +360,14 @@ class RuntimeController:
             cpu_threads=cpu_threads,
             target_fps=self.rgb_cfg.get('FPS', 30),
             target_res=self.target_res,
+            conf_thr=conf_thr,
             name=name
         )
         new_worker.start()
         self.detector_worker = new_worker
         return True
 
-    def update_detector_cfg(self, model_path=None, label_path=None, delegate=None, allowed_classes=None, use_npu=None, cpu_threads=None, restart=True):
+    def update_detector_cfg(self, model_path=None, label_path=None, delegate=None, allowed_classes=None, use_npu=None, cpu_threads=None, conf_thr=None, restart=True):
         cfg = dict(self.detector_cfg or {})
         if model_path:
             cfg['MODEL'] = model_path
@@ -379,6 +381,8 @@ class RuntimeController:
             cfg['USE_NPU'] = bool(use_npu)
         if cpu_threads is not None:
             cfg['CPU_THREADS'] = int(cpu_threads)
+        if conf_thr is not None:
+            cfg['CONF_THR'] = float(conf_thr)
         self.detector_cfg = cfg
         if restart:
             return self.restart_detector()
@@ -463,6 +467,7 @@ if __name__ == "__main__":
             'ALLOWED_CLASSES': [1],
             'USE_NPU': True,
             'CPU_THREADS': 1,
+            'CONF_THR': float(cfg.get('CONF_THR', cfg.get('CONF_THRESHOLD', 0.15))) if isinstance(cfg, dict) else 0.15,
             'NAME': "DetRGB",
         }
         rgb_det = TFLiteWorker(
@@ -470,7 +475,7 @@ if __name__ == "__main__":
             input_buf=d_rgb, output_buf=d_rgb_det,
             allowed_class_ids=rgb_det_cfg['ALLOWED_CLASSES'],
             use_npu=rgb_det_cfg['USE_NPU'], delegate_lib=delegate, cpu_threads=rgb_det_cfg['CPU_THREADS'],
-            target_fps=rgb_cfg['FPS'], target_res=target_res, name=rgb_det_cfg['NAME'])
+            target_fps=rgb_cfg['FPS'], target_res=target_res, conf_thr=rgb_det_cfg['CONF_THR'], name=rgb_det_cfg['NAME'])
         rgb_det.start()
     except Exception as e:
         logger.exception("RGB-TFLite - Start failed: %s", e)

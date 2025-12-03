@@ -34,7 +34,7 @@ def detect_fire(data, min_val, tau=0.95, thr=20, raw_thr=5, window_size=10, delt
     대기 투과율 보정을 적용하여 실제 온도를 추정합니다.
     
     Args:
-        data: RAW16 온도 데이터 (단위: 0.01 Kelvin, shape: 160x120 flatten)
+        data: RAW16 온도 데이터 (단위: 0.01 Kelvin, 2D 배열)
         min_val: 화점으로 판정할 최소 온도 (섭씨)
         tau: 대기 투과율 (0~1, 기본값 0.95 = 95% 투과, 실내용)
              - 실내/근거리: 0.95~1.0 (대기 흡수 적음)
@@ -58,6 +58,9 @@ def detect_fire(data, min_val, tau=0.95, thr=20, raw_thr=5, window_size=10, delt
         5. Contour 추출 및 BBox 생성
     """
     try:
+        data = np.asarray(data)
+        h, w = data.shape  # 입력 데이터 해상도 (회전/리사이즈 반영)
+
         # ===== 1단계: 온도 변환 =====
         # RAW16 데이터: 0.01 Kelvin 단위 (예: 30000 = 300.00K)
         T_scene_K = data / 100  # Kelvin으로 변환
@@ -73,12 +76,11 @@ def detect_fire(data, min_val, tau=0.95, thr=20, raw_thr=5, window_size=10, delt
         T_corrected_K = (T_scene_K - T_atm_K) / tau + T_atm_K
         
         # 섭씨로 변환하고 2D 배열로 reshape
-        temper_raw = (T_scene_K - T_0C_K).reshape(120, 160)      # 보정 전 온도 (섭씨)
-        temper = (T_corrected_K - T_0C_K).reshape(120, 160)      # 보정 후 온도 (섭씨)
+        temper_raw = (T_scene_K - T_0C_K)      # 보정 전 온도 (섭씨)
+        temper = (T_corrected_K - T_0C_K)      # 보정 후 온도 (섭씨)
 
         # ===== 3단계: 윈도우 기반 Hotspot 탐색 =====
         hotspots = []  # 탐지된 hotspot 리스트: [(x, y, temp, raw_temp), ...]
-        h, w = temper.shape  # 120 x 160
         mask = np.zeros((h, w), dtype=np.uint8)  # 화점 마스크
 
         # 이미지를 window_size x window_size 블록으로 나눠서 스캔

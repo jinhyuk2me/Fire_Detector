@@ -291,7 +291,8 @@ class TFLiteWorker(threading.Thread):
                  cpu_threads: int = 1,                  # 기본 1로 완화
                  target_fps: float = 0,
                  target_res: tuple = (960, 540),
-                 name: str = "DetWorker"):
+                 name: str = "DetWorker",
+                 conf_thr: float = SCORE_THRESH):
         super().__init__(daemon=True, name=name)
         self.model_path = model_path
         self.labels = self._load_labels(labels_path)
@@ -307,6 +308,7 @@ class TFLiteWorker(threading.Thread):
         self.target_res = target_res
         # 리스트/튜플 -> numpy array for fast isin checks (dtype int32)
         self.allowed_class_ids = None if allowed_class_ids is None else np.asarray(allowed_class_ids, dtype=np.int32)
+        self.conf_thr = float(conf_thr)
         
         cv2.setNumThreads(4)
         
@@ -410,7 +412,7 @@ class TFLiteWorker(threading.Thread):
         y = outs[0]
         # (B,N,C)/(B,C,N) → 박스/점수/클래스
         boxes_in, scores, classes = decode_yolov8_output(
-            y, in_w, in_h, SCORE_THRESH, num_classes=len(self.labels)
+            y, in_w, in_h, self.conf_thr, num_classes=len(self.labels)
         )
         # Optional: restrict to allowed classes before NMS to avoid cross-class suppression
         if self.allowed_class_ids is not None and classes.size > 0:
