@@ -184,11 +184,11 @@ class FireFusion:
                     if cf['eo_bbox'] == bbox:
                         matched_temp = cf['temp']
                         break
-                temp_str = f'{matched_temp:.0f}C' if matched_temp else ''
+                temp_str = f'{matched_temp:.0f}C' if matched_temp is not None else '-'
                 eo_annotations.append({
                     'bbox': bbox,
                     'color': COLOR_CONFIRMED,
-                    'label': f'FIRE {temp_str} ({eo_conf:.0%})',
+                    'label': f'FIRE ({temp_str}, {eo_conf:.0%})',
                     'status': FIRE_CONFIRMED
                 })
             else:
@@ -290,14 +290,33 @@ def draw_fire_annotations(frame, annotations):
         # 라벨 그리기
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.6
-        label_size, _ = cv2.getTextSize(label, font, font_scale, 2)
-        
-        # 라벨 배경
-        cv2.rectangle(frame, (x, y - label_size[1] - 10), 
-                     (x + label_size[0] + 10, y), color, -1)
-        
-        # 라벨 텍스트
-        cv2.putText(frame, label, (x + 5, y - 5), font, font_scale, 
-                   (255, 255, 255), 2)
+        text_y = max(0, y - 6)
+        cv2.putText(frame, label, (x, text_y), font, 0.8, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, label, (x, text_y), font, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
     
     return frame
+
+
+def apply_vis_mode(annotations, mode="test"):
+    """
+    시각화 모드에 따라 annotation을 필터/재색상한다.
+    - test: 그대로 표시
+    - temp: EO-only(노란색) 박스는 숨기고, 확정 화재(빨간색)는 노란색으로 표시
+    """
+    anns = annotations or []
+    mode_l = (mode or "test").lower()
+    if mode_l != "temp":
+        return anns
+
+    adjusted = []
+    for ann in anns:
+        status = ann.get("status")
+        if status == FIRE_FILTERED:
+            logger.debug("[VIS_MODE temp] skip filtered ann: %s", ann)
+            continue  # temp 모드에서는 필터링된 EO만 박스를 숨김
+        new_ann = dict(ann)
+        if status == FIRE_CONFIRMED:
+            new_ann["color"] = COLOR_FILTERED
+            logger.debug("[VIS_MODE temp] confirmed -> yellow: %s", new_ann)
+        adjusted.append(new_ann)
+    return adjusted

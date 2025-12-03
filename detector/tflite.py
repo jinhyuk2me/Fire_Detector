@@ -202,8 +202,7 @@ def unletterbox_xyxy(boxes_xyxy, gain, pad):
     return boxes
 
 
-def _draw_boxes(frame_bgr, boxes_xyxy, classes, scores, labels,
-                thr=SCORE_THRESH):
+def _draw_boxes(frame_bgr, boxes_xyxy, classes, scores, labels, thr=SCORE_THRESH):
     """원본 프레임 좌표 기준 boxes_xyxy를 그대로 그림"""
     H, W = frame_bgr.shape[:2]
     base = min(H, W)
@@ -334,10 +333,10 @@ class TFLiteWorker(threading.Thread):
 
     def _infer_once(self, frame_bgr):
         """
-        한 프레임에 대해:
-        - letterbox 전처리
-        - TFLite 추론
-        - YOLOv8 디코드 + NMS + unletterbox
+        한 프레임 처리:
+        1) letterbox + 전처리
+        2) TFLite invoke
+        3) YOLOv8 디코드 + NMS + 원본 좌표 복원
         """
         t0 = time.perf_counter()
 

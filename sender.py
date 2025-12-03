@@ -9,9 +9,10 @@ import logging
 import json
 import zlib
 import base64
+import os
 from datetime import datetime
 
-from core.fire_fusion import FireFusion, draw_fire_annotations
+from core.fire_fusion import FireFusion, draw_fire_annotations, apply_vis_mode
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ def _ts_to_epoch_ms(ts):
 
 
 def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
-                jpeg_quality=70, resize_factor=3, sync_cfg=None, stop_event=None,
+                jpeg_quality=70, resize_factor=1, sync_cfg=None, stop_event=None,
                 coord_state=None):
     """
     이미지 버퍼를 읽어서 TCP 소켓으로 전송 (JSON+zlib+base64)
@@ -248,6 +249,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
     backoff_base = 0.5   # 초, 재연결 초기 대기
     backoff_max = 5.0    # 초, 재연결 최대 대기
     backoff_attempts = 0
+    vis_mode = os.getenv("FUSION_VIS_MODE", "test").lower()
 
     def _backoff_sleep():
         nonlocal backoff_attempts
@@ -282,6 +284,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     logger.info("FireFusion calibration updated: %s", coord_params)
             
             timestamp = time.time()
+            vis_mode = os.getenv("FUSION_VIS_MODE", vis_mode).lower()
             
             # 각 버퍼에서 데이터 읽기
             rgb_item = d_rgb.read(timeout=0.05) if d_rgb else None
@@ -375,7 +378,14 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 
                 # 융합 결과에 따라 bbox 다시 그리기 (색상 구분)
                 if fusion_result and fusion_result.get('eo_annotations'):
-                    rgb_det_frame = draw_fire_annotations(rgb_det_frame, fusion_result['eo_annotations'])
+                    anns = apply_vis_mode(fusion_result['eo_annotations'], vis_mode)
+                    logger.debug(
+                        "[Sender] vis_mode=%s anns_in=%d anns_out=%d ir_hotspot=%d",
+                        vis_mode, len(fusion_result['eo_annotations']), len(anns), len(last_ir_hotspots)
+                    )
+                    fusion_result['eo_annotations'] = anns
+                    if anns:
+                        rgb_det_frame = draw_fire_annotations(rgb_det_frame, anns)
                 
                 # 리사이즈
                 if resize_factor > 1:
@@ -383,10 +393,9 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     rgb_det_frame = cv2.resize(rgb_det_frame, (w//resize_factor, h//resize_factor), 
                                                interpolation=cv2.INTER_LINEAR)
                 
-                _, encoded = cv2.imencode('.jpg', rgb_det_frame, encode_param)
                 packet['images']['rgb_det'] = {
-                    'data_b64': _b64(encoded.tobytes()),
-                    'compressed': True,
+                    'data_b64': _b64(rgb_det_frame.tobytes()),
+                    'compressed': False,
                     'shape': rgb_det_frame.shape,
                     'dtype': str(rgb_det_frame.dtype),
                     'timestamp': rgb_det_item[1] if len(rgb_det_item) > 1 else 0,
@@ -413,12 +422,22 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
 
             # ===== Fusion 결과를 패킷에 추가 =====
             if fusion_result:
+                anns = fusion_result.get('eo_annotations') or []
+                # JSON 직렬화 안전하게 색상 튜플을 리스트로 변환
+                anns_json = []
+                for ann in anns:
+                    ann_copy = dict(ann)
+                    color = ann_copy.get('color')
+                    if color is not None:
+                        ann_copy['color'] = list(color)
+                    anns_json.append(ann_copy)
                 packet['fire_fusion'] = {
                     'fire_detected': fusion_result.get('fire_detected', False),
                     'confidence': fusion_result.get('confidence', 0.0),
                     'status': fusion_result.get('status', 'NO_FIRE'),
                     'confirmed_count': fusion_result.get('confirmed_count', 0),
-                    'ir_only_count': fusion_result.get('ir_only_count', 0)
+                    'ir_only_count': fusion_result.get('ir_only_count', 0),
+                    'eo_annotations': anns_json,
                 }
                 
                 # RGB 원본 (저장 모드일 때만)

@@ -3,7 +3,7 @@ CAMERA:
     FPS: 9
     RES: [160, 120]
     SLEEP: 0.11
-    TAU: 0.95
+    TAU: 0.5
     FIRE_DETECTION: true
     FIRE_MIN_TEMP: 80
     FIRE_THR: 20

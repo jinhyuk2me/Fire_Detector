@@ -36,7 +36,7 @@ import numpy as np
 import cv2
 
 from core.coord_mapper import CoordMapper
-from core.fire_fusion import FireFusion
+from core.fire_fusion import FireFusion, apply_vis_mode
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
         self.det_ts_history = deque(maxlen=60)
         self.ir_ts_history = deque(maxlen=60)
         self.config = controller.cfg if hasattr(controller, "cfg") else {}
+        self.fusion_vis_mode = os.getenv("FUSION_VIS_MODE", "test").lower()
         self._last_det_ts = None
         self._coord_auto_set = False
         coord_params = self.controller.get_coord_cfg() if self.controller else {'offset_x': 0.0, 'offset_y': 0.0, 'scale': 1.0}
@@ -350,6 +351,10 @@ class MainWindow(QMainWindow):
             self.cls_smoke_chk.setChecked(True)
         if allowed is None or 1 in allowed:
             self.cls_fire_chk.setChecked(True)
+        self.vis_mode_combo = QComboBox()
+        self.vis_mode_combo.addItems(["test", "temp"])
+        self.vis_mode_combo.setCurrentText(os.getenv("FUSION_VIS_MODE", "test").lower())
+        self.vis_mode_combo.currentTextChanged.connect(self.on_vis_mode_change)
         self.apply_infer_btn = QPushButton("Apply RGB Inference")
         self.apply_infer_btn.clicked.connect(self.apply_infer_settings)
         # --- Input tab (RGB / IR) ---
@@ -549,14 +554,16 @@ class MainWindow(QMainWindow):
         infer_layout.addWidget(self.delegate_browse, 2, 2)
         infer_layout.addWidget(QLabel("Conf Thr"), 3, 0)
         infer_layout.addWidget(self.conf_spin, 3, 1)
+        infer_layout.addWidget(QLabel("Fusion Vis Mode"), 4, 0)
+        infer_layout.addWidget(self.vis_mode_combo, 4, 1)
         class_row = QHBoxLayout()
         _compact_layout(class_row, margins=(0, 0, 0, 0), h_spacing=6, v_spacing=6)
         class_row.addWidget(QLabel("Classes"))
         class_row.addWidget(self.cls_smoke_chk)
         class_row.addWidget(self.cls_fire_chk)
         class_row.addStretch()
-        infer_layout.addLayout(class_row, 4, 0, 1, 3)
-        infer_layout.addWidget(self.apply_infer_btn, 5, 0, 1, 3)
+        infer_layout.addLayout(class_row, 5, 0, 1, 3)
+        infer_layout.addWidget(self.apply_infer_btn, 6, 0, 1, 3)
         infer_box.setLayout(infer_layout)
 
         infer_tab = QWidget()
@@ -825,6 +832,7 @@ class MainWindow(QMainWindow):
         if not self.controller:
             self.append_log("Controller unavailable")
             return
+        self.on_vis_mode_change(self.vis_mode_combo.currentText())
         allowed = []
         if self.cls_smoke_chk.isChecked():
             allowed.append(0)
@@ -842,9 +850,14 @@ class MainWindow(QMainWindow):
                 use_npu=bool(self.delegate_edit.text().strip()),
                 restart=True
             )
-            self.append_log("RGB inference settings applied (detector restarted)")
+            self.append_log(f"RGB inference settings applied (detector restarted, vis_mode={self.fusion_vis_mode})")
         except Exception as e:
             self.append_log(f"RGB inference apply failed: {e}")
+
+    def on_vis_mode_change(self, text):
+        """시각화 모드 변경 시 내부 상태와 환경변수를 동기화"""
+        self.fusion_vis_mode = (text or "test").lower()
+        os.environ["FUSION_VIS_MODE"] = self.fusion_vis_mode
 
     def browse_model(self):
         start_dir = str(Path(self.model_edit.text()).parent) if self.model_edit.text() else str(Path.cwd())
@@ -968,49 +981,9 @@ class MainWindow(QMainWindow):
 
         self._sync_coord_ui()
 
-        # Fusion annotations (color-coded) drawn on det_frame base (det_frame has no boxes/text)
-        fusion_info = "-"
+        vis_mode = getattr(self, "fusion_vis_mode", "test")
+        # Fusion annotations will be drawn later (after mode filtering) on this base frame.
         annotated_det = det_frame.copy() if det_frame is not None else None
-        if det_meta and annotated_det is not None:
-            # EO det 노란 박스 + conf 텍스트를 GUI에서 직접 그려 같은 레이어 유지
-            for det in det_meta:
-                if len(det) < 6:
-                    continue
-                x, y, w, h, conf, cls_id = det[:6]
-                x1, y1, x2, y2 = int(x), int(y), int(x + w), int(y + h)
-                cv2.rectangle(annotated_det, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                cv2.putText(
-                    annotated_det,
-                    f"{conf:.2f}",
-                    (x1, max(0, y1 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            if self.controller:
-                params = self.controller.get_coord_cfg()
-                self.fire_fusion.coord_mapper = CoordMapper(
-                    ir_size=(160, 120),
-                    rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
-                    offset_x=params.get('offset_x', 0.0),
-                    offset_y=params.get('offset_y', 0.0),
-                    scale=params.get('scale'),
-                )
-            if not isinstance(ir_hotspots, list):
-                ir_hotspots = []
-            eo_bboxes = [d for d in det_meta if len(d) >= 6]
-            fusion = self.fire_fusion.fuse(ir_hotspots, eo_bboxes)
-            fusion_info = f"{fusion['status']} | conf={fusion['confidence']:.2f} | ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
-            for ann in fusion.get('eo_annotations', []):
-                bbox = ann.get('bbox', [])
-                if len(bbox) < 4:
-                    continue
-                x, y, w, h = bbox
-                color = ann.get('color', (0, 0, 255))
-                cv2.rectangle(annotated_det, (int(x), int(y)), (int(x + w), int(y + h)), color, 3)
 
         if rgb_frame is not None:
             pix = _cv_to_qpixmap(rgb_frame)
@@ -1114,6 +1087,10 @@ class MainWindow(QMainWindow):
                 ir_hotspots = []
             eo_bboxes = [d for d in det_meta if len(d) >= 6]
             fusion = self.fire_fusion.fuse(ir_hotspots, eo_bboxes)
+            anns_in = fusion.get('eo_annotations', [])
+            anns_out = apply_vis_mode(anns_in, vis_mode)
+            logger.debug("[GUI] vis_mode=%s anns_in=%d anns_out=%d ir_hotspot=%d", vis_mode, len(anns_in), len(anns_out), len(ir_hotspots))
+            fusion['eo_annotations'] = anns_out
             fusion_info = f"{fusion['status']} | conf={fusion['confidence']:.2f} | ir_hotspot={len(ir_hotspots)} | eo={len(eo_bboxes)}"
             for ann in fusion.get('eo_annotations', []):
                 bbox = ann.get('bbox', [])
@@ -1121,7 +1098,26 @@ class MainWindow(QMainWindow):
                     continue
                 x, y, w, h = bbox
                 color = ann.get('color', (0, 0, 255))
-                cv2.rectangle(annotated_det, (int(x), int(y)), (int(x + w), int(y + h)), color, 3)
+                x0, y0 = int(x), int(y)
+                x1, y1 = int(x + w), int(y + h)
+                cv2.rectangle(annotated_det, (x0, y0), (x1, y1), color, 3)
+                label = ann.get('label', "")
+                if label:
+                    text_y = max(0, y0 - 6)
+                    cv2.putText(annotated_det, label, (x0, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(annotated_det, label, (x0, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Det view 업데이트는 vis_mode 적용 후 그린 annotated_det을 사용
+        if annotated_det is not None:
+            pix = _cv_to_qpixmap(annotated_det)
+            if pix:
+                self.det_label.setPixmap(pix.scaled(
+                    self.det_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+            model_name = getattr(self.config, "MODEL", "-") if self.config else "-"
+            self.det_info.setText(
+                f"Det {annotated_det.shape[1]}x{annotated_det.shape[0]} | det={det_count} | model={model_name}"
+            )
 
 
 def run_gui(buffers, camera_state, controller):

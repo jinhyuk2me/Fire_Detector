@@ -52,6 +52,22 @@ def _decode_image(entry):
         return None
 
 
+def _maybe_decode_annots(entry):
+    """fusion 결과의 eo_annotations를 파이썬 객체로 복원"""
+    if not entry:
+        return []
+    if isinstance(entry, str):
+        try:
+            return json.loads(entry)
+        except Exception:
+            return []
+    if isinstance(entry, dict):
+        return entry.get("eo_annotations", []) or []
+    if isinstance(entry, list):
+        return entry
+    return []
+
+
 class ImageReceiver:
     def __init__(self, host="0.0.0.0", port=9999, max_packet_mb=4.0):
         self.host = host
@@ -179,6 +195,7 @@ def receive_and_display(host="0.0.0.0", port=9999):
     recv_times = []
     loop_times = []
     ir_scale = 1.0
+    rgb_scale = 1.0
 
     try:
         while True:
@@ -224,6 +241,10 @@ def receive_and_display(host="0.0.0.0", port=9999):
 
             t_display_start = time.perf_counter()
             if rgb_det_display is not None:
+                if abs(rgb_scale - 1.0) > 1e-3:
+                    new_w = max(1, int(rgb_det_display.shape[1] * rgb_scale))
+                    new_h = max(1, int(rgb_det_display.shape[0] * rgb_scale))
+                    rgb_det_display = cv2.resize(rgb_det_display, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 target_h, target_w = rgb_det_display.shape[:2]
                 if ir_display is not None:
                     if abs(ir_scale - 1.0) > 1e-3:
@@ -244,7 +265,14 @@ def receive_and_display(host="0.0.0.0", port=9999):
                         cv2.BORDER_CONSTANT,
                         value=(0, 0, 0),
                     )
-                    combined = np.vstack([rgb_det_display, ir_padded])
+                    try:
+                        combined = np.vstack([rgb_det_display, ir_padded])
+                    except Exception:
+                        # 최종 폭이 다르면 패딩을 다시 맞춰서 안전하게 이어붙이기
+                        min_w = min(rgb_det_display.shape[1], ir_padded.shape[1])
+                        rgb_crop = rgb_det_display[:, :min_w]
+                        ir_crop = ir_padded[:, :min_w]
+                        combined = np.vstack([rgb_crop, ir_crop])
                 else:
                     combined = rgb_det_display
                 cv2.imshow("LK ROBOTICS Inc.", combined)
@@ -302,6 +330,12 @@ def receive_and_display(host="0.0.0.0", port=9999):
             elif key == ord("]"):  # IR 확대
                 ir_scale = min(4.0, ir_scale + 0.1)
                 print(f"[Receiver] IR scale: {ir_scale:.2f}")
+            elif key == ord("{"):  # RGB_det 축소
+                rgb_scale = max(0.1, rgb_scale - 0.1)
+                print(f"[Receiver] RGB_det scale: {rgb_scale:.2f}")
+            elif key == ord("}"):  # RGB_det 확대
+                rgb_scale = min(4.0, rgb_scale + 0.1)
+                print(f"[Receiver] RGB_det scale: {rgb_scale:.2f}")
 
             if saving:
                 save_rgb = _decode_image(images.get("rgb"))
