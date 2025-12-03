@@ -8,6 +8,65 @@ from datetime import datetime
 from core.util import dyn_sleep
 from core.state import camera_state
 from camera.frame_source import FrameSource
+from camera.device_selector import CameraDeviceSelector
+
+
+def _log(msg):
+    print(f"[RGBCamera] {msg}")
+
+
+def _open_capture(dev_path, dev_num, size, fps):
+    """한 번의 시도로 캡처를 연다. 성공/실패 여부만 반환."""
+    _log(f"Opening video device: {dev_path} (index: {dev_num})")
+    w, h = size
+
+    gst_pipeline = (
+        f"v4l2src device={dev_path} ! "
+        f"video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 ! "
+        "videoconvert ! appsink"
+    )
+    cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+
+    if cap.isOpened():
+        return cap
+
+    _log("GStreamer backend failed, trying V4L2 with device index...")
+    cap = cv2.VideoCapture(dev_num if dev_num is not None else dev_path, cv2.CAP_V4L2)
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'NV12'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+    return cap
+
+
+def _log(msg):
+    print(f"[RGBCamera] {msg}")
+
+
+def _open_capture(dev_path, dev_num, size, fps):
+    """한 번의 시도로 캡처를 연다. 성공/실패 여부만 반환."""
+    _log(f"Opening video device: {dev_path} (index: {dev_num})")
+    w, h = size
+
+    gst_pipeline = (
+        f"v4l2src device={dev_path} ! "
+        f"video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 ! "
+        "videoconvert ! appsink"
+    )
+    cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+
+    if cap.isOpened():
+        return cap
+
+    _log("GStreamer backend failed, trying V4L2 with device index...")
+    cap = cv2.VideoCapture(dev_num if dev_num is not None else dev_path, cv2.CAP_V4L2)
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'NV12'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+    return cap
 
 
 class RGBCamera(FrameSource):
@@ -22,6 +81,10 @@ class RGBCamera(FrameSource):
         self.size = cfg['RES']
         self.sleep = cfg['SLEEP']
         self.device_override = cfg.get('DEVICE_OVERRIDE')
+        self._auto_selector = CameraDeviceSelector(
+            target_size=cfg.get('RES', (640, 480)),
+            min_width=max(320, cfg.get('RES', [0])[0]),
+        )
 
         self.d_buffer = d_buffer
 
@@ -38,12 +101,12 @@ class RGBCamera(FrameSource):
         rep_fps = self.cap.get(cv2.CAP_PROP_FPS)
         act_h, act_w = frame.shape[:2]
 
-        print(f"Connected to {device}")
-        print(
+        _log(f"Connected to {device}")
+        _log(
             f"Resolution - requested: {req_w}x{req_h}, "
             f"reported: {rep_w}x{rep_h}, actual: {act_w}x{act_h}"
         )
-        print(f"FPS - requested: {self.fps}, reported: {rep_fps:.2f}")
+        _log(f"FPS - requested: {self.fps}, reported: {rep_fps:.2f}")
 
     def init_cam(self):
         device_override = getattr(self, 'device_override', None)
@@ -59,29 +122,7 @@ class RGBCamera(FrameSource):
             except Exception:
                 dev_num = None
         
-        def _open_cap():
-            print(f"Opening video device: {dev_path} (index: {dev_num})")
-            
-            gst_pipeline = (
-                f"v4l2src device={dev_path} ! "
-                f"video/x-raw,format=NV12,width={self.size[0]},height={self.size[1]},framerate={self.fps}/1 ! "
-                "videoconvert ! appsink"
-            )
-            
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            
-            if not cap.isOpened():
-                print("GStreamer backend failed, trying V4L2 with device index...")
-                cap = cv2.VideoCapture(dev_num if dev_num is not None else dev_path, cv2.CAP_V4L2)
-                if cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'NV12'))
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
-                    cap.set(cv2.CAP_PROP_FPS, self.fps)
-            
-            return cap
-        
-        self.cap = _open_cap()
+        self.cap = _open_capture(dev_path, dev_num, self.size, self.fps)
         
         if not self.cap.isOpened():
             try:
@@ -90,20 +131,20 @@ class RGBCamera(FrameSource):
                     check=False,
                     capture_output=True
                 )
-                print("Ran 'udevadm trigger', retrying capture...")
+                _log("Ran 'udevadm trigger', retrying capture...")
                 time.sleep(2.0)
-                self.cap = _open_cap()
+                self.cap = _open_capture(dev_path, dev_num, self.size, self.fps)
             except Exception as e:
-                print(f"udevadm trigger failed: {e}")
+                _log(f"udevadm trigger failed: {e}")
 
         if self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
                 self._print_cap_info(dev_path or self._get_device(), frame)
             else:
-                print(f"Device opened but failed to read frame from {dev_path}")
+                _log(f"Device opened but failed to read frame from {dev_path}")
         else:
-            print(f"Failed to open device {dev_path}")
+            _log(f"Failed to open device {dev_path}")
             
     def _get_device(self):
         raise NotImplementedError("_get_device() must be implemented in subclass")

@@ -11,7 +11,7 @@ import argparse
 
 # from vis import visualize
 from sender import send_images
-from configs.get_cfg import get_cfg
+from configs.get_cfg import get_cfg, ConfigError
 
 from camera.source_factory import create_rgb_source, create_ir_source
 from detector.tflite import TFLiteWorker
@@ -154,6 +154,12 @@ class CoordState:
 
 
 class RuntimeController:
+    """
+    런타임 파이프라인을 묶어 관리하는 컨트롤러.
+    - 카메라 소스/탐지 워커 시작·정지
+    - 송신(TCP)/디스플레이 제어
+    - 좌표/캡처 설정 공유
+    """
     def __init__(self, buffers, server, sync_cfg, display_cfg, target_res, coord_cfg, capture_cfg, cfg=None):
         self.buffers = buffers
         self.server = server
@@ -175,10 +181,27 @@ class RuntimeController:
         self.ir_input_cfg = None
         self.detector_worker = None
         self.detector_cfg = {}
+        self._threads = {}
+
+    def _start_thread(self, name, target, args=(), kwargs=None):
+        if name in self._threads and self._threads[name].is_alive():
+            return False
+        t = threading.Thread(target=target, args=args, kwargs=kwargs or {}, daemon=True)
+        self._threads[name] = t
+        t.start()
+        return True
+
+    def _stop_thread(self, name, stop_event=None, join_timeout=2.0):
+        t = self._threads.get(name)
+        if not t:
+            return False
+        if stop_event:
+            stop_event.set()
+        t.join(timeout=join_timeout)
+        self._threads.pop(name, None)
+        return True
 
     def start_sender(self):
-        if self.sender_thread and self.sender_thread.is_alive():
-            return False
         self.sender_stop.clear()
         kwargs = {
             "host": self.server['IP'],
@@ -188,7 +211,8 @@ class RuntimeController:
             "stop_event": self.sender_stop,
             "coord_state": self.coord_state,
         }
-        self.sender_thread = threading.Thread(
+        return self._start_thread(
+            "sender",
             target=send_images,
             args=(
                 self.buffers['rgb'],
@@ -197,42 +221,34 @@ class RuntimeController:
                 self.buffers['rgb_det'],
             ),
             kwargs=kwargs,
-            daemon=True
         )
-        self.sender_thread.start()
-        return True
 
     def stop_sender(self):
-        if not self.sender_thread:
-            return False
-        self.sender_stop.set()
-        self.sender_thread.join(timeout=2.0)
-        self.sender_thread = None
-        return True
+        return self._stop_thread("sender", stop_event=self.sender_stop)
 
     def sender_running(self):
-        return self.sender_thread is not None and self.sender_thread.is_alive()
+        t = self._threads.get("sender")
+        return t is not None and t.is_alive()
 
     def start_display(self):
-        if self.display_thread and self.display_thread.is_alive():
+        if self.display_enabled:
             return False
         self.display_enabled = True
         window_name = self.display_cfg.get('WINDOW_NAME', "Vision AI Display")
-        self.display_thread = threading.Thread(
+        return self._start_thread(
+            "display",
             target=display_loop,
             args=(self.buffers['rgb'], self.buffers['ir'], self.buffers['rgb_det']),
             kwargs={"window_name": window_name, "target_res": self.target_res},
-            daemon=True
         )
-        self.display_thread.start()
-        return True
 
     def stop_display(self):
         self.display_enabled = False
-        return True  # display loop exits on window close
+        return self._stop_thread("display")
 
     def display_running(self):
-        return self.display_enabled
+        t = self._threads.get("display")
+        return self.display_enabled and t is not None and t.is_alive()
 
     def set_sources(self, rgb_source, ir_source, rgb_cfg, ir_cfg, rgb_input_cfg, ir_input_cfg):
         self.rgb_source = rgb_source
@@ -390,103 +406,260 @@ class RuntimeController:
             return self.restart_detector()
         return True
 
+    def status(self):
+        """송신/디스플레이/소스/탐지기 상태를 요약"""
+        return {
+            "sender": self.sender_running(),
+            "display": self.display_running(),
+            "rgb_source": getattr(self.rgb_source, "thread", None) is not None and getattr(self.rgb_source.thread, "is_alive", lambda: False)(),
+            "ir_source": getattr(self.ir_source, "thread", None) is not None and getattr(self.ir_source.thread, "is_alive", lambda: False)(),
+            "detector": self.detector_worker is not None and self.detector_worker.is_alive(),
+        }
 
-if __name__ == "__main__":
+
+def _load_config():
+    cfg = get_cfg()
+    if cfg is None:
+        raise RuntimeError("Config is empty or invalid")
+    return cfg
+
+
+def _build_buffers():
+    d16_ir, d_ir = DoubleBuffer(), DoubleBuffer()
+    d_rgb, d_rgb_det = DoubleBuffer(), DoubleBuffer()
+    return {
+        'rgb': d_rgb,
+        'rgb_det': d_rgb_det,
+        'ir': d_ir,
+        'ir16': d16_ir,
+    }
+
+
+def _start_sources(ir_cfg, ir_input_cfg, rgb_cfg, rgb_input_cfg, buffers):
+    logger.info("IR source - Starting (%s)", ir_input_cfg.get('MODE', 'live'))
+    ir_source = create_ir_source(ir_cfg, ir_input_cfg, buffers['ir'], buffers['ir16'])
+    ir_source.start()
+
+    logger.info("RGB source - Starting (%s)", rgb_input_cfg.get('MODE', 'live'))
+    rgb_source = create_rgb_source(rgb_cfg, rgb_input_cfg, buffers['rgb'])
+    rgb_source.start()
+
+    return rgb_source, ir_source
+
+
+def _start_detector(cfg, rgb_cfg, buffers, delegate, model, label):
+    rgb_det_cfg = {
+        'MODEL': model,
+        'LABEL': label,
+        'DELEGATE': delegate,
+        'ALLOWED_CLASSES': [1],
+        'USE_NPU': True,
+        'CPU_THREADS': 1,
+        'CONF_THR': float(getattr(cfg, 'CONF_THR', getattr(cfg, 'CONF_THRESHOLD', 0.15))),
+        'NAME': "DetRGB",
+    }
+    worker = TFLiteWorker(
+        model_path=model,
+        labels_path=label,
+        input_buf=buffers['rgb'],
+        output_buf=buffers['rgb_det'],
+        allowed_class_ids=rgb_det_cfg['ALLOWED_CLASSES'],
+        use_npu=rgb_det_cfg['USE_NPU'],
+        delegate_lib=delegate,
+        cpu_threads=rgb_det_cfg['CPU_THREADS'],
+        target_fps=rgb_cfg['FPS'],
+        target_res=tuple(getattr(cfg, 'TARGET_RES', (rgb_cfg.get('RES', [0, 0])[0], rgb_cfg.get('RES', [0, 0])[1]))),
+        conf_thr=rgb_det_cfg['CONF_THR'],
+        name=rgb_det_cfg['NAME'],
+    )
+    worker.start()
+    return worker, rgb_det_cfg
+
+
+def _init_pipeline(gui_mode=False):
+    cfg = _load_config()
+    model = cfg.MODEL
+    label = cfg.LABEL
+    server = cfg.SERVER
+    delegate = cfg.DELEGATE
+    ir_cfg = cfg.CAMERA_IR.__dict__
+    rgb_cfg = cfg.CAMERA_RGB_FRONT.__dict__
+    state = cfg.STATE
+    target_res = tuple(cfg.TARGET_RES)
+    display_cfg = cfg.DISPLAY
+    sync_cfg = cfg.SYNC
+    input_cfg = cfg.INPUT
+
+    rgb_input_cfg = dict(input_cfg.get('RGB', {})) if isinstance(input_cfg, dict) else {}
+    ir_input_cfg = dict(input_cfg.get('IR', {})) if isinstance(input_cfg, dict) else {}
+    _apply_input_overrides("RGB", rgb_input_cfg)
+    _apply_input_overrides("IR", ir_input_cfg)
+
+    display_enabled = False
+    display_window = "Vision AI Display"
+    if isinstance(display_cfg, dict):
+        display_enabled = display_cfg.get('ENABLED', False)
+        display_window = display_cfg.get('WINDOW_NAME', display_window)
+    else:
+        display_enabled = bool(display_cfg)
+    if gui_mode:
+        display_enabled = False
+
+    buffers = _build_buffers()
+
+    try:
+        rgb_source, ir_source = _start_sources(ir_cfg, ir_input_cfg, rgb_cfg, rgb_input_cfg, buffers)
+    except Exception as e:
+        logger.exception("Camera source start failed: %s", e)
+        raise
+
+    try:
+        rgb_det, rgb_det_cfg = _start_detector(cfg, rgb_cfg, buffers, delegate, model, label)
+    except Exception as e:
+        logger.exception("RGB-TFLite - Start failed: %s", e)
+        raise
+
+    coord_cfg = cfg.COORD
+    capture_cfg = cfg.CAPTURE
+    controller = RuntimeController(
+        buffers,
+        server,
+        sync_cfg,
+        display_cfg if isinstance(display_cfg, dict) else {},
+        target_res,
+        coord_cfg,
+        capture_cfg,
+        cfg=cfg
+    )
+    controller.set_sources(rgb_source, ir_source, rgb_cfg, ir_cfg, rgb_input_cfg, ir_input_cfg)
+    if rgb_det:
+        controller.set_detector(rgb_det, rgb_det_cfg)
+
+    return {
+        'cfg': cfg,
+        'controller': controller,
+        'display_enabled': display_enabled,
+        'display_window': display_window,
+        'gui_mode': gui_mode,
+    }
+
+
+def _run_cli(ctx):
+    controller = ctx['controller']
+    display_enabled = ctx['display_enabled']
+    gui_mode = ctx['gui_mode']
+
+    if not gui_mode:
+        try:
+            logger.info("TCP Sender - Starting")
+            controller.start_sender()
+        except Exception as e:
+            logger.exception("TCP Sender - Start failed: %s", e)
+
+    if display_enabled:
+        try:
+            logger.info("Display - Starting")
+            controller.start_display()
+        except Exception as e:
+            logger.exception("Display - Start failed: %s", e)
+
+    old_settings = setup_keyboard()
+    print_help()
+    try:
+        while True:
+            key = check_keyboard()
+
+            if key == '1':
+                angle = camera_state.rotate_ir_cw()
+                logger.info("[IR] Rotation: %s degrees", angle)
+            elif key == '2':
+                state = camera_state.toggle_flip_h_ir()
+                logger.info("[IR] Horizontal flip: %s", "ON" if state else "OFF")
+            elif key == '3':
+                state = camera_state.toggle_flip_v_ir()
+                logger.info("[IR] Vertical flip: %s", "ON" if state else "OFF")
+            elif key == '4':
+                angle = camera_state.rotate_rgb_cw()
+                logger.info("[RGB] Rotation: %s degrees", angle)
+            elif key == '5':
+                state = camera_state.toggle_flip_h_rgb()
+                logger.info("[RGB] Horizontal flip: %s", "ON" if state else "OFF")
+            elif key == '6':
+                state = camera_state.toggle_flip_v_rgb()
+                logger.info("[RGB] Vertical flip: %s", "ON" if state else "OFF")
+            elif key == '7':
+                state = camera_state.toggle_flip_h_both()
+                logger.info("[BOTH] Horizontal flip: %s", "ON" if state else "OFF")
+            elif key == '8':
+                state = camera_state.toggle_flip_v_both()
+                logger.info("[BOTH] Vertical flip: %s", "ON" if state else "OFF")
+            elif key == 's':
+                status = camera_state.get_status()
+                ir = status['ir']
+                rgb = status['rgb']
+                logger.info(
+                    "[Status] IR rotate=%3d flip_h=%s flip_v=%s",
+                    ir['rotate'], "ON" if ir['flip_h'] else "OFF", "ON" if ir['flip_v'] else "OFF"
+                )
+                logger.info(
+                    "[Status] RGB rotate=%3d flip_h=%s flip_v=%s",
+                    rgb['rotate'], "ON" if rgb['flip_h'] else "OFF", "ON" if rgb['flip_v'] else "OFF"
+                )
+            elif key == 'h':
+                print_help()
+            elif key == 'q':
+                logger.info("Shutting down...")
+                break
+
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    finally:
+        if controller:
+            controller.stop_sources()
+        restore_keyboard(old_settings)
+
+
+def _run_gui(ctx):
+    try:
+        from gui.app_gui import run_gui
+    except ImportError as e:
+        logger.error("GUI mode requested but PyQt6 not available: %s", e)
+        sys.exit(1)
+
+    run_gui(
+        ctx['controller'].buffers,
+        camera_state,
+        ctx['controller'],
+    )
+
+
+def main():
     args = parse_args()
     env_mode = os.getenv("APP_MODE", "cli").lower()
     selected_mode = (args.mode or env_mode).lower()
     gui_mode = selected_mode == "gui"
-    
+
     setup_logging()
-    logger = logging.getLogger(__name__)
-    cv2.ocl.setUseOpenCL(True)    # GPU 가속 (Vivante GPU 사용)
-    display_enabled = False
-    display_window = "Vision AI Display"
-    controller = None
-    rgb_det = None
-    
-    try:
-        cfg = get_cfg()
-        if not cfg or not isinstance(cfg, dict):
-            raise RuntimeError("Config is empty or invalid")
-        model = cfg['MODEL']
-        label = cfg['LABEL']
-        server = cfg['SERVER']
-        delegate = cfg['DELEGATE']
-        ir_cfg = cfg['CAMERA']['IR']
-        rgb_cfg = cfg['CAMERA']['RGB_FRONT']
-        state = cfg['STATE']
-        target_res = tuple(cfg['TARGET_RES'])
-        display_cfg = cfg.get('DISPLAY', {})
-        sync_cfg = cfg.get('SYNC', {})
-        input_cfg = cfg.get('INPUT', {})
+    cv2.ocl.setUseOpenCL(True)
 
-        rgb_input_cfg = dict(input_cfg.get('RGB', {}))
-        ir_input_cfg = dict(input_cfg.get('IR', {}))
-        _apply_input_overrides("RGB", rgb_input_cfg)
-        _apply_input_overrides("IR", ir_input_cfg)
-        rgb_mode = str(rgb_input_cfg.get('MODE') or 'live').lower()
-        ir_mode = str(ir_input_cfg.get('MODE') or 'live').lower()
-
-        if isinstance(display_cfg, dict):
-            display_enabled = display_cfg.get('ENABLED', False)
-            display_window = display_cfg.get('WINDOW_NAME', display_window)
-        else:
-            display_enabled = bool(display_cfg)
-        if gui_mode:
-            display_enabled = False
-
-        d16_ir, d_ir = DoubleBuffer(), DoubleBuffer()
-        d_rgb, d_rgb_det = DoubleBuffer(), DoubleBuffer()
-        buffers = {
-            'rgb': d_rgb,
-            'rgb_det': d_rgb_det,
-            'ir': d_ir,
-            'ir16': d16_ir,
-        }
-
-    except Exception as e:
-        logger.exception("Config - Load failed: %s", e)
-        sys.exit(1)
-    
     try:
-        logger.info("IR source - Starting (%s)", ir_mode)
-        ir_source = create_ir_source(ir_cfg, ir_input_cfg, d_ir, d16_ir)
-        ir_source.start()
-    except Exception as e:
-        logger.exception("IR source - Start failed: %s", e)
+        ctx = _init_pipeline(gui_mode=gui_mode)
+    except ConfigError as e:
+        logger.error("Config error: %s", e)
         sys.exit(1)
-    
-    try:
-        logger.info("RGB source - Starting (%s)", rgb_mode)
-        rgb_source = create_rgb_source(rgb_cfg, rgb_input_cfg, d_rgb)
-        rgb_source.start()
     except Exception as e:
-        logger.exception("RGB source - Start failed: %s", e)
+        logger.exception("Pipeline init failed: %s", e)
         sys.exit(1)
-    
-    try:
-        logger.info("RGB-TFLite - Starting")
-        rgb_det_cfg = {
-            'MODEL': model,
-            'LABEL': label,
-            'DELEGATE': delegate,
-            'ALLOWED_CLASSES': [1],
-            'USE_NPU': True,
-            'CPU_THREADS': 1,
-            'CONF_THR': float(cfg.get('CONF_THR', cfg.get('CONF_THRESHOLD', 0.15))) if isinstance(cfg, dict) else 0.15,
-            'NAME': "DetRGB",
-        }
-        rgb_det = TFLiteWorker(
-            model_path=model, labels_path=label,
-            input_buf=d_rgb, output_buf=d_rgb_det,
-            allowed_class_ids=rgb_det_cfg['ALLOWED_CLASSES'],
-            use_npu=rgb_det_cfg['USE_NPU'], delegate_lib=delegate, cpu_threads=rgb_det_cfg['CPU_THREADS'],
-            target_fps=rgb_cfg['FPS'], target_res=target_res, conf_thr=rgb_det_cfg['CONF_THR'], name=rgb_det_cfg['NAME'])
-        rgb_det.start()
-    except Exception as e:
-        logger.exception("RGB-TFLite - Start failed: %s", e)
-        sys.exit(1)
+
+    if gui_mode:
+        _run_gui(ctx)
+    else:
+        _run_cli(ctx)
+
+
+if __name__ == "__main__":
+    main()
 
     # try:
     #     print("Visualize - Starting")

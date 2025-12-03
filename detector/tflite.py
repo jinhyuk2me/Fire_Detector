@@ -85,62 +85,27 @@ def nms_numpy(boxes_xyxy, scores, iou_thr=0.45, top_k=300):
     return np.array(keep, dtype=np.int32)
 
 
-def preprocess_from_lb(lb_img, inp_dtype, inp_q):
-    """
-    letterbox된 BGR 이미지를 TFLite 입력 텐서로 변환.
-    - int8, scale≈1/255, zp=-128 인 경우: 빠른 정수 경로 사용 (img - 128)
-    - 그 외: 기존 float 기반 일반 경로 사용
-    """
+def preprocess_letterbox(lb_img, inp_dtype, inp_q, out_arr):
+    """letterbox된 BGR 이미지를 TFLite 입력 텐서(out_arr)에 채웁니다."""
     scale, zp = inp_q
 
-    # ===== [빠른 경로] 현재 네 모델 케이스: int8, scale=1/255, zp=-128 =====
     if inp_dtype == np.int8 and abs(scale - (1.0 / 255.0)) < 1e-6 and zp == -128:
-        # BGR -> RGB 변환
         rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB)
-        x = rgb.astype(np.int16)
-        x -= 128                      # in-place 연산
-        x = x.astype(np.int8)        # 여기서 이미 [-128,127] 범위 보장
-        return x[None, ...]
-
-    # ===== [일반 경로] 다른 모델에도 재사용 가능하도록 남겨둠 =====
-    img = lb_img.astype(np.float32) / 255.0   # 0~1 정규화
-    x = img[None, ...]
-    if inp_dtype == np.uint8:
-        x = (x * 255.0 + 0.5).astype(np.uint8)
-    elif inp_dtype == np.int8:
-        if scale and scale > 0:
-            x = np.clip(x / scale + zp, -128, 127).astype(np.int8)
-        else:
-            x = (x * 255.0 - 128).astype(np.int8)
-    else:
-        x = x.astype(inp_dtype)
-    return x
-
-def preprocess_from_lb_inplace(lb_img, inp_dtype, inp_q, out_arr):
-    """
-    letterbox된 BGR 이미지를 TFLite 입력 텐서(out_arr)에 in-place로 변환.
-    - out_arr: (1, H, W, C), dtype == inp_dtype
-    - int8, scale≈1/255, zp=-128 인 경우: 빠른 정수 경로 사용 (img - 128)
-    - 그 외: float 기반 일반 경로 사용 (필요시 확장 가능)
-    """
-    scale, zp = inp_q
-
-    # ===== [빠른 경로] full-int8, scale=1/255, zp=-128 =====
-    if inp_dtype == np.int8 and abs(scale - (1.0 / 255.0)) < 1e-6 and zp == -128:
-        # BGR -> RGB 변환
-        rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB)
-        # lb_img: uint8(0~255) 가정
-        # q = img - 128  → real = (q + 128)/255 = img/255
-        dst = out_arr[0]                  # (H, W, C)
-        tmp = rgb.astype(np.int16)        # 오버플로우 방지
-        tmp -= 128                        # in-place 연산
-        dst[...] = tmp.astype(np.int8)    # [-128,127] 범위에 정확히 매핑
+        tmp = rgb.astype(np.int16)
+        tmp -= 128
+        out_arr[0, ...] = tmp.astype(np.int8)
         return out_arr
 
-    # ===== [일반 경로] (다른 모델에도 재사용 가능) =====
     img = lb_img.astype(np.float32) / 255.0
-    x = img.astype(inp_dtype)
-    out_arr[0, ...] = x
+    if inp_dtype == np.uint8:
+        out_arr[0, ...] = (img * 255.0 + 0.5).astype(np.uint8)
+    elif inp_dtype == np.int8:
+        if scale and scale > 0:
+            out_arr[0, ...] = np.clip(img / scale + zp, -128, 127).astype(np.int8)
+        else:
+            out_arr[0, ...] = (img * 255.0 - 128).astype(np.int8)
+    else:
+        out_arr[0, ...] = img.astype(inp_dtype)
     return out_arr
 
 def dequant(arr, q):
@@ -272,11 +237,10 @@ def _draw_boxes(frame_bgr, boxes_xyxy, classes, scores, labels,
 
 class TFLiteWorker(threading.Thread):
     """
-    YOLOv8 TFLite 전용 추론 스레드
-    - input_buf: DoubleBuffer (read() -> (frame_bgr, ts))
-    - output_buf: DoubleBuffer (write((vis_frame_bgr, ts)))
-    - 표시 해상도(TARGET_W,H)에 맞춰 리사이즈 후, 그 위에 박스 오버레이해서 출력
-      (※ 여기서는 원본 크기에 박스를 그린 뒤, 마지막에 리사이즈)
+    YOLOv8 TFLite 추론 스레드.
+    - input_buf: (frame_bgr, ts) 입력
+    - output_buf: (vis_frame_bgr, ts, detections) 출력
+    - 내부에서 전처리(letterbox)→추론→NMS→원본 좌표 복원까지 수행
     """
     def __init__(self,
                  model_path: str,
@@ -396,8 +360,7 @@ class TFLiteWorker(threading.Thread):
             lb_img, (gw, gh), (pw, ph), cache_params = letterbox(frame_bgr, (in_h, in_w))
             self._lb_params_cache = cache_params + ((h0, w0),)
         
-        # x = preprocess_from_lb(lb_img, inp_dtype, inp_q)
-        x = preprocess_from_lb_inplace(lb_img, inp_dtype, inp_q, self._input_buf)
+        x = preprocess_letterbox(lb_img, inp_dtype, inp_q, self._input_buf)
         t_pre = time.perf_counter()
 
         # ---- 핵심 추론 ----

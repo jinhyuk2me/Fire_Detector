@@ -185,10 +185,11 @@ class IRCamera(FrameSource):
     
     PureThermal 보드를 통해 FLIR Lepton 센서 데이터를 캡처하고,
     실시간으로 처리하여 DoubleBuffer에 저장합니다.
-    
+
     출력 데이터:
         1. d_buffer: 컬러맵 이미지 (8bit BGR, 화면 표시용)
         2. d16_buffer: RAW16 온도 데이터 (16bit, 분석/저장용)
+        3. 최고온도/핫스팟 정보 (탐지/융합에 사용)
     
     Attributes:
         cam: ThermalCamera 인스턴스 (libuvc 기반)

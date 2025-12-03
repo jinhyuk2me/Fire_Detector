@@ -15,6 +15,11 @@ from core.fire_fusion import FireFusion, draw_fire_annotations
 
 logger = logging.getLogger(__name__)
 
+REQUIRED_IMAGES = {
+    "rgb_det": ("data_b64", "shape", "dtype"),
+    "ir": ("data_b64", "shape", "dtype"),
+}
+
 
 class ImageSender:
     def __init__(self, host='localhost', port=9999, max_packet_mb=2.0):
@@ -157,7 +162,9 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 jpeg_quality=70, resize_factor=3, sync_cfg=None, stop_event=None,
                 coord_state=None):
     """
-    이미지 버퍼를 읽어서 TCP 소켓으로 전송
+    이미지 버퍼를 읽어서 TCP 소켓으로 전송 (JSON+zlib+base64)
+    - 최신 프레임만 전송하여 적체를 방지
+    - 연결이 끊기면 지수 백오프로 재연결 시도
     
     Args:
         d_rgb: RGB 카메라 버퍼
@@ -171,7 +178,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
     """
     sender = ImageSender(host, port)
     
-    # 연결 재시도
+    # 연결 재시도 (초기)
     max_retries = 5
     retry_count = 0
     while retry_count < max_retries:
@@ -228,11 +235,25 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
     def _b64(data: bytes) -> str:
         return base64.b64encode(data).decode('ascii')
 
+    def _valid_image_entry(name, entry):
+        required = REQUIRED_IMAGES.get(name, ())
+        return entry is not None and all(k in entry for k in required)
+
     def _calc_packet_size_bytes(obj) -> int:
         payload_json = json.dumps(obj, separators=(',', ':'), ensure_ascii=False)
         raw = payload_json.encode('utf-8')
         comp = zlib.compress(raw, level=6)
         return min(len(raw), len(comp))
+
+    backoff_base = 0.5   # 초, 재연결 초기 대기
+    backoff_max = 5.0    # 초, 재연결 최대 대기
+    backoff_attempts = 0
+
+    def _backoff_sleep():
+        nonlocal backoff_attempts
+        delay = min(backoff_max, backoff_base * (2 ** backoff_attempts))
+        backoff_attempts = min(backoff_attempts + 1, 8)
+        time.sleep(delay)
 
     try:
         while True:
@@ -241,11 +262,12 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 break
 
             if not sender.connected:
-                logger.warning("Disconnected. Attempting to reconnect...")
+                logger.warning("Disconnected. Attempting to reconnect (attempt %d)...", backoff_attempts + 1)
                 if sender.connect():
                     logger.info("Reconnected successfully")
+                    backoff_attempts = 0
                 else:
-                    time.sleep(2)
+                    _backoff_sleep()
                     continue
             
             # Receiver로부터 제어 명령 확인
@@ -262,10 +284,10 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
             timestamp = time.time()
             
             # 각 버퍼에서 데이터 읽기
-            rgb_item = d_rgb.read() if d_rgb else None
-            ir_item = d_ir.read() if d_ir else None
-            ir16_item = d16_ir.read() if d16_ir else None
-            rgb_det_item = d_rgb_det.read() if d_rgb_det else None
+            rgb_item = d_rgb.read(timeout=0.05) if d_rgb else None
+            ir_item = d_ir.read(timeout=0.05) if d_ir else None
+            ir16_item = d16_ir.read(timeout=0.05) if d16_ir else None
+            rgb_det_item = d_rgb_det.read(timeout=0.05) if d_rgb_det else None
             
             # ===== 독립적 타임스탬프 체크 =====
             ir_updated = False
@@ -416,6 +438,15 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                         'resized': resize_factor > 1
                     }
             
+            # 패킷 검증: 필수 이미지 엔트리에 data/shape/dtype 없으면 전송하지 않음
+            if any(
+                img in packet['images'] and not _valid_image_entry(img, packet['images'][img])
+                for img in REQUIRED_IMAGES
+            ):
+                logger.warning("Invalid packet schema detected; skipping send")
+                time.sleep(0.001)
+                continue
+
             # 전송
             send_start = time.perf_counter()
             if sender.send_frame_data(packet):
@@ -445,8 +476,8 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     last_print_time = current_time
                     send_times.clear()
             else:
-                logger.warning("Failed to send frame, retrying...")
-                time.sleep(0.1)
+                logger.warning("Failed to send frame, retrying with backoff...")
+                _backoff_sleep()
             
             # 짧은 딜레이 (CPU 부하 감소)
             time.sleep(0.001)

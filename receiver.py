@@ -9,6 +9,11 @@ import zlib
 import cv2
 import numpy as np
 
+REQUIRED_IMAGES = {
+    "rgb_det": ("data_b64", "shape", "dtype"),
+    "ir": ("data_b64", "shape", "dtype"),
+}
+
 # ===== 저장 경로 설정 =====
 SAVE_DIR_RGB = "save/visible"
 SAVE_DIR_IR = "save/lwir"
@@ -20,12 +25,17 @@ def _decode_image(entry):
     """JSON 패킷의 이미지 엔트리를 numpy 배열로 복원"""
     if not entry:
         return None
+    # 필수 키 존재 여부 확인
+    if not all(k in entry for k in ("data_b64", "shape", "dtype")):
+        print("[Receiver] Invalid image entry schema")
+        return None
     data_b64 = entry.get("data_b64")
     if not data_b64:
         return None
     try:
         raw = base64.b64decode(data_b64)
     except Exception:
+        print("[Receiver] base64 decode failed")
         return None
 
     if entry.get("compressed"):
@@ -168,6 +178,7 @@ def receive_and_display(host="0.0.0.0", port=9999):
     display_times = []
     recv_times = []
     loop_times = []
+    ir_scale = 1.0
 
     try:
         while True:
@@ -188,6 +199,16 @@ def receive_and_display(host="0.0.0.0", port=9999):
 
             timestamp = packet.get("timestamp", 0)
             images = packet.get("images", {})
+            if not isinstance(images, dict):
+                print("[Receiver] Invalid packet: images missing")
+                continue
+            # 필수 이미지 스키마 체크
+            if any(
+                name in images and not all(k in images[name] for k in REQUIRED_IMAGES[name])
+                for name in REQUIRED_IMAGES
+            ):
+                print("[Receiver] Invalid image schema, skipping packet")
+                continue
 
             ir_display = None
             rgb_det_display = None
@@ -205,6 +226,10 @@ def receive_and_display(host="0.0.0.0", port=9999):
             if rgb_det_display is not None:
                 target_h, target_w = rgb_det_display.shape[:2]
                 if ir_display is not None:
+                    if abs(ir_scale - 1.0) > 1e-3:
+                        new_w = max(1, int(ir_display.shape[1] * ir_scale))
+                        new_h = max(1, int(ir_display.shape[0] * ir_scale))
+                        ir_display = cv2.resize(ir_display, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                     ir_h, ir_w = ir_display.shape[:2]
                     pad_top = max(0, (target_h - ir_h) // 2)
                     pad_bottom = max(0, target_h - ir_h - pad_top)
@@ -224,6 +249,10 @@ def receive_and_display(host="0.0.0.0", port=9999):
                     combined = rgb_det_display
                 cv2.imshow("LK ROBOTICS Inc.", combined)
             elif ir_display is not None:
+                if abs(ir_scale - 1.0) > 1e-3:
+                    new_w = max(1, int(ir_display.shape[1] * ir_scale))
+                    new_h = max(1, int(ir_display.shape[0] * ir_scale))
+                    ir_display = cv2.resize(ir_display, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 cv2.imshow("LK ROBOTICS Inc.", ir_display)
             t_display_end = time.perf_counter()
             display_times.append((t_display_end - t_display_start) * 1000)
@@ -267,6 +296,12 @@ def receive_and_display(host="0.0.0.0", port=9999):
                     saving = False
                     print("[Receiver] Saving stopped.")
                     receiver.send_control_command("stop_saving")
+            elif key == ord("["):  # IR 축소
+                ir_scale = max(0.1, ir_scale - 0.1)
+                print(f"[Receiver] IR scale: {ir_scale:.2f}")
+            elif key == ord("]"):  # IR 확대
+                ir_scale = min(4.0, ir_scale + 0.1)
+                print(f"[Receiver] IR scale: {ir_scale:.2f}")
 
             if saving:
                 save_rgb = _decode_image(images.get("rgb"))

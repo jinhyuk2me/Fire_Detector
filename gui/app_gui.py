@@ -237,9 +237,10 @@ class MainWindow(QMainWindow):
         self._last_det_ts = None
         self._coord_auto_set = False
         coord_params = self.controller.get_coord_cfg() if self.controller else {'offset_x': 0.0, 'offset_y': 0.0, 'scale': 1.0}
+        target_res = getattr(self.config, "TARGET_RES", (960, 540))
         self.fire_fusion = FireFusion(
             ir_size=(160, 120),
-            rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
+            rgb_size=tuple(target_res),
             offset_x=0,
             offset_y=0,
             scale=None,
@@ -1021,7 +1022,7 @@ class MainWindow(QMainWindow):
             if self.controller:
                 rgb_cfg, _ = self.controller.get_input_cfg()
                 rgb_dev = rgb_cfg.get('DEVICE', "-")
-            model_name = self.config.get('MODEL', "-") if self.config else "-"
+            model_name = getattr(self.config, "MODEL", "-") if self.config else "-"
             self.rgb_info.setText(
                 f"RGB {rgb_frame.shape[1]}x{rgb_frame.shape[0]} | fps~{_calc_fps(self.rgb_ts_history):.1f} | dev={rgb_dev} | model={model_name}"
             )
@@ -1031,7 +1032,7 @@ class MainWindow(QMainWindow):
                 self.det_label.setPixmap(pix.scaled(
                     self.det_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation))
-            model_name = self.config.get('MODEL', "-") if self.config else "-"
+            model_name = getattr(self.config, "MODEL", "-") if self.config else "-"
             self.det_info.setText(
                 f"Det {annotated_det.shape[1]}x{annotated_det.shape[0]} | det={det_count} | model={model_name}"
             )
@@ -1104,7 +1105,7 @@ class MainWindow(QMainWindow):
                 params = self.controller.get_coord_cfg()
                 self.fire_fusion.coord_mapper = CoordMapper(
                     ir_size=(160, 120),
-                    rgb_size=tuple(self.config.get('TARGET_RES', (960, 540))),
+                    rgb_size=tuple(getattr(self.config, "TARGET_RES", (960, 540))),
                     offset_x=params.get('offset_x', 0.0),
                     offset_y=params.get('offset_y', 0.0),
                     scale=params.get('scale'),
