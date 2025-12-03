@@ -19,6 +19,8 @@ from core.buffer import DoubleBuffer
 from core.state import camera_state
 from display import display_loop
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging():
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -248,13 +250,13 @@ class RuntimeController:
         if self.rgb_source:
             try:
                 self.rgb_source.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("RGB source stop failed: %s", exc)
         if self.ir_source:
             try:
                 self.ir_source.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("IR source stop failed: %s", exc)
 
     def restart_sources(self, rgb_input_cfg=None, ir_input_cfg=None):
         if rgb_input_cfg:
@@ -405,6 +407,8 @@ if __name__ == "__main__":
     
     try:
         cfg = get_cfg()
+        if not cfg or not isinstance(cfg, dict):
+            raise RuntimeError("Config is empty or invalid")
         model = cfg['MODEL']
         label = cfg['LABEL']
         server = cfg['SERVER']
@@ -443,13 +447,15 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.exception("Config - Load failed: %s", e)
-        
+        sys.exit(1)
+    
     try:
         logger.info("IR source - Starting (%s)", ir_mode)
         ir_source = create_ir_source(ir_cfg, ir_input_cfg, d_ir, d16_ir)
         ir_source.start()
     except Exception as e:
         logger.exception("IR source - Start failed: %s", e)
+        sys.exit(1)
     
     try:
         logger.info("RGB source - Starting (%s)", rgb_mode)
@@ -457,6 +463,7 @@ if __name__ == "__main__":
         rgb_source.start()
     except Exception as e:
         logger.exception("RGB source - Start failed: %s", e)
+        sys.exit(1)
     
     try:
         logger.info("RGB-TFLite - Starting")
@@ -479,6 +486,7 @@ if __name__ == "__main__":
         rgb_det.start()
     except Exception as e:
         logger.exception("RGB-TFLite - Start failed: %s", e)
+        sys.exit(1)
 
     # try:
     #     print("Visualize - Starting")

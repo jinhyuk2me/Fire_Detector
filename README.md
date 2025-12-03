@@ -20,6 +20,17 @@ NXP i.MX8M Plus 환경을 우선 대상으로 하는 듀얼 카메라 화재 감
 - OpenCV (GStreamer 지원), PyQt6(GUI), tflite-runtime, pyyaml, numpy
 - 보드용 NPU delegate `.so` (예: `/usr/lib/libvx_delegate.so`)
 
+## 설치 / 환경 준비
+### PC(개발/테스트)
+1. `python3 -m venv .venv && source .venv/bin/activate`
+2. `pip install -r requirements.txt`
+3. 기본 PC 프로파일은 `configs/config_pc.yaml` (모델/라벨 경로는 `./model/` 기준). 다른 프로파일을 쓰려면 `CONFIG_PATH` 환경변수로 지정.
+
+### 보드(i.MX8M Plus)
+- BSP에 포함된 OpenCV / tflite-runtime 사용을 권장합니다. `requirements.txt`의 `opencv-python-headless`/`tflite-runtime` 라인은 PC 기본값이므로, 보드에서 충돌 시 생략하고 `numpy`, `pyyaml` 등만 설치하세요.
+- delegate 경로(`DELEGATE`)가 실제 `.so` 파일을 가리키는지 확인하세요. 보통 `/usr/lib/libvx_delegate.so`.
+- 나머지 Python 패키지는 `pip install -r requirements.txt`로 설치 가능하나, 보드별 패키지 제공 정책에 따라 조정하세요.
+
 ## 설정
 `CONFIG_PATH` 환경변수로 프로파일을 선택합니다.
 - `configs/config.yaml`: 보드용(VX delegate 경로 포함)
@@ -35,6 +46,16 @@ CONFIG_PATH=configs/config_pc.yaml APP_MODE=gui python3 app.py
 ```
 RGB_INPUT_MODE=video RGB_VIDEO_PATH=/data/rgb.mp4 IR_INPUT_MODE=mock python3 app.py
 ```
+
+## 테스트
+- 개발용 패키지 설치: `pip install -r requirements-dev.txt`
+- 최소 테스트 실행: `pytest`
+- `tests/test_video_sources.py`는 `sample/fire_sample.mp4`가 있을 때만 실행합니다.
+
+## 수신(Receiver)
+- 송신/수신 프로토콜은 JSON+zlib+base64 기반입니다(`sender.py`, `receiver.py`).
+- 수신 실행 예: `python3 receiver.py` (기본 포트 9999, 저장 경로 `save/visible`, `save/lwir`)
+- 송신 측과 동일한 호스트/포트를 맞춰주세요.
 
 ## 실행 모드
 - 기본: CLI (터미널 단축키로 회전/반전)

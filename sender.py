@@ -1,12 +1,14 @@
 # sender.py
 import cv2
 import time
-import pickle
 import struct
 import socket
 import numpy as np
 import threading
 import logging
+import json
+import zlib
+import base64
 from datetime import datetime
 
 from core.fire_fusion import FireFusion, draw_fire_annotations
@@ -15,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImageSender:
-    def __init__(self, host='localhost', port=9999):
+    def __init__(self, host='localhost', port=9999, max_packet_mb=2.0):
         self.host = host
         self.port = port
         self.sock = None
@@ -23,6 +25,7 @@ class ImageSender:
         self.connected = False
         self.saving_mode = False  # Receiver의 저장 상태
         self.control_lock = threading.Lock()
+        self.max_packet_bytes = int(max_packet_mb * 1024 * 1024)
         
     def connect(self):
         """서버에 연결"""
@@ -71,8 +74,12 @@ class ImageSender:
                     return
                 payload += chunk
             
-            # 명령 파싱
-            command_dict = pickle.loads(payload)
+            # 명령 파싱 (JSON)
+            try:
+                command_dict = json.loads(payload.decode('utf-8'))
+            except Exception:
+                logger.warning("Control command decode failed")
+                return
             command = command_dict.get('command', '')
             
             with self.control_lock:
@@ -95,9 +102,15 @@ class ImageSender:
             return False
             
         try:
-            # 데이터를 pickle로 직렬화
-            payload = pickle.dumps(data_dict, protocol=pickle.HIGHEST_PROTOCOL)
+            # JSON 직렬화 후 zlib 압축
+            payload_json = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False)
+            raw_bytes = payload_json.encode('utf-8')
+            compressed = zlib.compress(raw_bytes, level=6)
+            payload = compressed if len(compressed) < len(raw_bytes) else raw_bytes
             payload_size = len(payload)
+            if payload_size > self.max_packet_bytes:
+                logger.warning("Packet too large (%d > %d bytes); dropping", payload_size, self.max_packet_bytes)
+                return False
             
             # 1. 데이터 크기를 먼저 전송 (4바이트, big-endian)
             size_header = struct.pack('>L', payload_size)
@@ -212,6 +225,15 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
     # 성능 측정용
     send_times = []
     
+    def _b64(data: bytes) -> str:
+        return base64.b64encode(data).decode('ascii')
+
+    def _calc_packet_size_bytes(obj) -> int:
+        payload_json = json.dumps(obj, separators=(',', ':'), ensure_ascii=False)
+        raw = payload_json.encode('utf-8')
+        comp = zlib.compress(raw, level=6)
+        return min(len(raw), len(comp))
+
     try:
         while True:
             if stop_event and stop_event.is_set():
@@ -291,7 +313,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     last_ir_hotspots = ir_item[3]
                 
                 packet['images']['ir'] = {
-                    'data': ir_frame.tobytes(),
+                    'data_b64': _b64(ir_frame.tobytes()),
                     'compressed': False,
                     'shape': ir_frame.shape,
                     'dtype': str(ir_frame.dtype),
@@ -306,7 +328,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 if is_saving and ir16_item and ir16_item[0] is not None:
                     ir16_frame = ir16_item[0]
                     packet['images']['ir16'] = {
-                        'data': ir16_frame.tobytes(),
+                        'data_b64': _b64(ir16_frame.tobytes()),
                         'compressed': False,
                         'shape': ir16_frame.shape,
                         'dtype': str(ir16_frame.dtype),
@@ -341,7 +363,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                 
                 _, encoded = cv2.imencode('.jpg', rgb_det_frame, encode_param)
                 packet['images']['rgb_det'] = {
-                    'data': encoded.tobytes(),
+                    'data_b64': _b64(encoded.tobytes()),
                     'compressed': True,
                     'shape': rgb_det_frame.shape,
                     'dtype': str(rgb_det_frame.dtype),
@@ -386,7 +408,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                                               interpolation=cv2.INTER_LINEAR)
                     _, encoded = cv2.imencode('.jpg', rgb_frame, encode_param)
                     packet['images']['rgb'] = {
-                        'data': encoded.tobytes(),
+                        'data_b64': _b64(encoded.tobytes()),
                         'compressed': True,
                         'shape': rgb_frame.shape,
                         'dtype': str(rgb_frame.dtype),
@@ -411,8 +433,7 @@ def send_images(d_rgb, d_ir, d16_ir, d_rgb_det, host='localhost', port=5000,
                     avg_send = sum(send_times) / len(send_times) if send_times else 0
                     
                     # 패킷 크기 계산
-                    payload = pickle.dumps(packet, protocol=pickle.HIGHEST_PROTOCOL)
-                    packet_size_kb = len(payload) / 1024
+                    packet_size_kb = _calc_packet_size_bytes(packet) / 1024.0
                     
                     mode_str = "SAVING" if is_saving else "DISPLAY"
                     image_keys = list(packet['images'].keys())
